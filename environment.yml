@@ -1,0 +1,11 @@
+name: iml
+channels:
+  - defaults
+dependencies:
+  - numpy[version='<2.2']
+  - pandas
+  - python=3.11
+  - ipykernel
+variables:
+  GEMINI_API_KEY: AIzaSyAytAhE71103Gd9YN6jeEF0OL4O0p_XhIQ
+prefix: /home/shiinehata/anaconda3/envs/iml
