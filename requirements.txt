@@ -29,7 +29,6 @@ fonttools==4.59.0
 frozenlist==1.7.0
 fsspec==2025.3.0
 ftfy==6.3.1
-gensim==4.3.3
 google-ai-generativelanguage==0.6.15
 google-api-core==2.25.1
 google-api-python-client==2.177.0
@@ -67,7 +66,6 @@ jupyter_core==5.8.1
 kiwisolver==1.4.8
 langchain==0.3.27
 langchain-anthropic==0.3.18
-langchain-aws==0.2.30
 langchain-community==0.3.27
 langchain-core==0.3.72
 langchain-google-genai==2.0.8
@@ -95,8 +93,7 @@ narwhals==2.0.1
 nbformat==5.10.4
 networkx==3.5
 nltk==3.9.1
-numba==0.61.0
-numpy==1.26.4
+numpy==2.1
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cuda-cupti-cu12==12.6.80
 nvidia-cuda-nvrtc-cu12==12.6.77
