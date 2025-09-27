@@ -713,7 +713,29 @@ class Manager:
         
         # Copy best submission to final_submission folder
         if best_iteration_name:
-            best_iteration_path = os.path.join(original_output_folder, best_iteration_name)
+            # Resolve folder by normalizing name (case/format-insensitive)
+            def _normalize(s: str) -> str:
+                import re
+                return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_") if s else ""
+
+            candidates = []
+            try:
+                from pathlib import Path as _P
+                root = _P(original_output_folder)
+                for d in root.iterdir():
+                    if d.is_dir() and d.name.startswith("iteration_"):
+                        candidates.append(d)
+            except Exception:
+                pass
+
+            resolved_path = None
+            norm_target = _normalize(best_iteration_name)
+            for d in candidates:
+                if d.name == best_iteration_name or d.name.lower() == best_iteration_name.lower() or _normalize(d.name) == norm_target:
+                    resolved_path = str(d)
+                    break
+
+            best_iteration_path = resolved_path or os.path.join(original_output_folder, best_iteration_name)
             success = self._copy_best_submission(best_iteration_path, original_output_folder)
             
             if success:

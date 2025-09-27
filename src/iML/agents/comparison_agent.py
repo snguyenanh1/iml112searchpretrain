@@ -180,11 +180,20 @@ class IterationResultExtractor:
             
             result["output_files"].append("submission.csv")
             
-            # Extract scores from stdout
-            stdout_files = [
-                iteration_path / "states" / "assemble" / f"attempt_{i}" / "stdout.txt"
-                for i in range(1, 6)  # Check up to 5 attempts
-            ]
+            # Extract scores/logs from all assemble attempts under states
+            attempts_root = iteration_path / "states" / "assemble"
+            stdout_files: List[Path] = []
+            if attempts_root.exists():
+                try:
+                    attempt_dirs = [d for d in attempts_root.iterdir() if d.is_dir() and d.name.startswith("attempt_")]
+                    # sort by numeric suffix
+                    attempt_dirs.sort(key=lambda p: int(p.name.split("_")[1]))
+                    for d in attempt_dirs:
+                        p = d / "stdout.txt"
+                        if p.exists():
+                            stdout_files.append(p)
+                except Exception as e:
+                    logger.warning(f"Could not enumerate attempt dirs under {attempts_root}: {e}")
             
             all_stdout = ""
             for stdout_file in stdout_files:
@@ -202,8 +211,8 @@ class IterationResultExtractor:
                 # Keep last 1000 chars for summary display
                 result["stdout_excerpt"] = all_stdout[-1000:] if len(all_stdout) > 1000 else all_stdout
             
-            # Extract stderr excerpt  
-            stderr_files = [f.replace("stdout.txt", "stderr.txt") for f in stdout_files]
+            # Extract stderr excerpt (aligned by attempt)
+            stderr_files = [p.with_name("stderr.txt") for p in stdout_files]
             all_stderr = ""
             for stderr_file in stderr_files:
                 if Path(stderr_file).exists():
