@@ -11,6 +11,7 @@ from .profiling_summarizer_agent import ProfilingSummarizerAgent
 from .model_retriever_agent import ModelRetrieverAgent
 from .comparison_agent import ComparisonAgent
 from .debug_agent import DebugAgent
+from .ensemble_agent import EnsembleAgent
 
 __all__ = [
     "BaseAgent",
@@ -24,4 +25,5 @@ __all__ = [
     "ModelRetrieverAgent",
     "ComparisonAgent",
     "DebugAgent",
+    "EnsembleAgent",
 ]

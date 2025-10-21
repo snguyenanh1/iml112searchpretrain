@@ -116,6 +116,7 @@ The **Multi-Iteration AutoML** mode is an advanced feature that automatically ge
 - **Consistent Reproducibility**: All approaches use `random_state=42` and same train/test splits
 - **3-Fold Cross-Validation**: Each iteration implements 3-fold CV for reliable evaluation
 - **LLM-Based Intelligent Comparison**: Advanced AI agent analyzes and ranks all solutions
+- **🆕 Automatic Ensemble**: Combines successful iterations using iterative refinement (inspired by Google ADK)
 - **Automatic Best Selection**: The system copies the best-performing solution to `final_submission/`
 
 #### Usage:
@@ -148,16 +149,24 @@ python run.py --single-iteration pretrained -i ./your_dataset
 #### Output Structure:
 ```
 runs/run_<timestamp>/
-├── iteration_1_traditional/     # Traditional ML solution
+├── iteration_1_pretrained/       # Pretrained model solution
 │   ├── submission.csv
 │   └── states/final_executable_code.py
-├── iteration_2_custom_nn/       # Custom NN solution  
-├── iteration_3_pretrained/      # Pretrained model solution
-├── llm_comparison_results.json  # Detailed LLM analysis & ranking
-└── final_submission/            # Best solution (auto-selected)
-    ├── submission.csv           # Best submission file
-    ├── final_executable_code.py # Best solution code
-    └── selection_metadata.json  # Selection details
+├── iteration_2_traditional/      # Traditional ML solution
+├── iteration_3_custom_nn/        # Custom NN solution  
+├── llm_comparison_results.json   # Detailed LLM analysis & ranking
+├── 🆕 ensemble/                  # Ensemble workspace
+│   ├── input/                    # Data files
+│   ├── execution_round_0/        # Initial ensemble execution
+│   ├── execution_round_1/        # Refined ensemble execution
+│   └── execution_round_2/        # Further refinement
+├── 🆕 ensemble_results.json      # Ensemble workflow results
+├── 🆕 best_ensemble_code.py      # Best ensemble implementation
+├── 🆕 submission_ensemble.csv    # Ensemble predictions
+└── final_submission/             # Best single solution (auto-selected)
+    ├── submission.csv            # Best submission file
+    ├── final_executable_code.py  # Best solution code
+    └── selection_metadata.json   # Selection details
 ```
 
 #### LLM-Based Intelligent Selection:
@@ -166,6 +175,13 @@ runs/run_<timestamp>/
 - **Complexity Evaluation**: Balances performance vs code complexity
 - **Business Context**: Factors in interpretability requirements
 - **Detailed Reasoning**: Provides comprehensive justification for selection
+
+#### 🆕 Automatic Ensemble (Inspired by Google ADK):
+- **Iterative Refinement**: Generates and tests multiple ensemble strategies
+- **Intelligent Plan Generation**: LLM proposes ensemble methods (weighted averaging, stacking, voting, etc.)
+- **Automatic Execution**: Implements, executes, and scores each ensemble attempt
+- **Score-Based Selection**: Automatically selects the best performing ensemble
+- **Submission Generation**: Creates `submission_ensemble.csv` ready for submission
 
 ### Configuration Files
 

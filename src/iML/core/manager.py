@@ -24,6 +24,7 @@ from ..agents import (
     AssemblerAgent,
     ComparisonAgent,
     DebugAgent,
+    EnsembleAgent,
 )
 from ..agents.comparison_agent import IterationResultExtractor
 from ..llm import ChatLLMFactory
@@ -141,6 +142,12 @@ class Manager:
             config=config,
             manager=self,
             llm_config=self.config.assembler,  # Using same LLM config as assembler
+        )
+        self.ensemble_agent = EnsembleAgent(
+            config=config,
+            manager=self,
+            llm_config=self.config.assembler,  # Using same LLM config as assembler
+            max_refinement_rounds=getattr(config, 'ensemble_max_rounds', 3)
         )
         # Initialize DebugAgent once for search-driven patching across phases
         self.debug_agent = DebugAgent(
@@ -710,6 +717,47 @@ class Manager:
             with open(comparison_file, 'w', encoding='utf-8') as f:
                 json.dump(comparison_result, f, indent=2, ensure_ascii=False)
             logger.info(f"LLM comparison report saved to: {comparison_file}")
+        
+        # Create and execute ensemble from successful iterations
+        logger.info("=== Creating and Executing Ensemble ===")
+        ensemble_result = self.ensemble_agent(
+            iteration_paths=iteration_paths,
+            iteration_results=iteration_results
+        )
+        
+        if ensemble_result.get("status") != "skipped":
+            if "error" not in ensemble_result:
+                logger.info("✅ Ensemble workflow completed successfully")
+                
+                # Save detailed ensemble results
+                ensemble_file = os.path.join(original_output_folder, "ensemble_results.json")
+                # Remove code from result to avoid huge JSON (code is saved separately)
+                ensemble_summary = {
+                    k: v for k, v in ensemble_result.items() 
+                    if k not in ['best_code']
+                }
+                with open(ensemble_file, 'w', encoding='utf-8') as f:
+                    json.dump(ensemble_summary, f, indent=2, ensure_ascii=False)
+                logger.info(f"Ensemble results saved to: {ensemble_file}")
+                
+                # Save best ensemble code
+                if ensemble_result.get("best_code"):
+                    ensemble_code_file = os.path.join(original_output_folder, "best_ensemble_code.py")
+                    with open(ensemble_code_file, 'w', encoding='utf-8') as f:
+                        f.write(ensemble_result.get("best_code"))
+                    logger.info(f"💡 Best ensemble code saved to: {ensemble_code_file}")
+                
+                # Check if submission_ensemble.csv was created
+                ensemble_submission = os.path.join(original_output_folder, "submission_ensemble.csv")
+                if os.path.exists(ensemble_submission):
+                    logger.info(f"🎯 Ensemble submission created: {ensemble_submission}")
+                    logger.info(f"📊 Ensemble score: {ensemble_result.get('best_score', 'N/A')}")
+                else:
+                    logger.warning("⚠️  submission_ensemble.csv was not created")
+            else:
+                logger.warning(f"Ensemble workflow encountered issues: {ensemble_result.get('error')}")
+        else:
+            logger.info(f"⏭️  Ensemble skipped: {ensemble_result.get('reason', 'Unknown reason')}")
         
         # Copy best submission to final_submission folder
         if best_iteration_name:
