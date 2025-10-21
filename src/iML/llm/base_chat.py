@@ -239,7 +239,7 @@ class BaseAssistantChat(BaseModel):
                 ai_message = response["messages"][-1]
                 input_tokens = output_tokens = 0
 
-                if hasattr(ai_message, "usage_metadata"):
+                if hasattr(ai_message, "usage_metadata") and ai_message.usage_metadata is not None:
                     usage = ai_message.usage_metadata
                     input_tokens = usage.get("input_tokens", 0)
                     output_tokens = usage.get("output_tokens", 0)
