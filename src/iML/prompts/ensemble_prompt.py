@@ -199,16 +199,23 @@ class EnsemblePrompt(BasePrompt):
 
 {python_solutions}
 
+# Important Information
+- The iteration submission files are available as `./input/submission_iter1.csv`, `./input/submission_iter2.csv`, etc.
+- You can directly load and combine these prediction files instead of re-running the entire solutions.
+- All the provided data is already prepared and available in the `./input` directory. There is no need to unzip any files.
+
 # Your task
 - Suggest a plan to ensemble the {num_solutions} solutions. You should concentrate on how to merge, not the other parts like hyperparameters.
 - The suggested plan should be novel, effective, and easy to implement.
-- All the provided data is already prepared and available in the `./input` directory. There is no need to unzip any files.
+- Consider the performance of each solution when designing the ensemble strategy.
+- The ensemble should compute a real validation score to measure performance.
 
 # Response format
 - Your response should be an outline/sketch of your proposed solution in natural language.
 - There should be no additional headings or text in your response.
 - Plan should not modify the original solutions too much since execution error can occur.
-- Be specific about the ensemble method (weighted average, stacking, voting, etc.)."""
+- Be specific about the ensemble method (weighted average, stacking, voting, etc.).
+- Specify how to validate the ensemble performance on a validation set."""
 
     def _get_refinement_template(self) -> str:
         """Template for refining ensemble plan (inspired by ADK)."""
@@ -228,12 +235,19 @@ class EnsemblePrompt(BasePrompt):
 - The suggested plan must be easy to implement, novel, and effective.
 - The suggested plan should be different from the previous plans you have tried and should receive a {criteria} score.
 - Learn from the failures and successes of previous attempts.
+- Note: Scores marked as "Failed" indicate that either the code failed to execute or returned a placeholder/invalid score (0.0).
+
+# Important Information
+- The iteration submission files are available as `./input/submission_iter1.csv`, `./input/submission_iter2.csv`, etc.
+- You can directly load and combine these prediction files for faster and more reliable ensembling.
+- Ensure your plan includes proper validation score computation on real data, NOT placeholder values.
 
 # Response format
 - Your response should be an outline/sketch of your proposed solution in natural language.
 - There should be no additional headings or text in your response.
 - Plan should not modify the original solutions too much since execution error can occur.
-- Be specific about the ensemble method and how it differs from previous attempts."""
+- Be specific about the ensemble method and how it differs from previous attempts.
+- Specify how to compute a real validation score to measure ensemble performance."""
 
     def _get_implementation_template(self) -> str:
         """Template for implementing ensemble plan (inspired by ADK)."""
@@ -251,16 +265,24 @@ class EnsemblePrompt(BasePrompt):
 - Implement the ensemble plan with the provided solutions.
 - Unless mentioned in the ensemble plan, do not modify the original Python Solutions too much.
 - All the provided data is already prepared and available in the `./input` directory. There is no need to unzip any files.
-- The code should implement the proposed solution and print the value of the evaluation metric computed on a hold-out validation set.
+- The iteration submission files are available as `./input/submission_iter1.csv`, `./input/submission_iter2.csv`, etc. You can load and ensemble these predictions directly.
+
+# CRITICAL REQUIREMENTS for Validation Score:
+- You MUST compute a REAL validation score on actual validation/test data, NOT a placeholder or dummy value.
+- Split the training data into train/validation sets (e.g., 80/20 split) OR use the provided validation data if available.
+- Compute the ensemble predictions on the validation set.
+- Calculate the actual evaluation metric (RMSE, Accuracy, F1, etc.) on these predictions.
+- The validation score must be a real numeric value computed from actual predictions, NOT 0.0, NOT a placeholder.
 
 # Response format required
 - Your response should be a single markdown code block (wrapped in ```) which is the ensemble of {num_solutions} Python Solutions.
 - There should be no additional headings or text in your response.
 - Do not modify original Python Solutions especially the submission part due to formatting issue of submission.csv.
 - Do not subsample or introduce dummy variables. You have to provide full new Python Solution using the {num_solutions} provided solutions.
-- Print out or return a final performance metric in your answer in a clear format with the exact words: 'Final Validation Performance: {{final_validation_score}}'.
+- MANDATORY: Print the REAL validation performance metric using the EXACT format: 'Final Validation Performance: {{actual_score}}' where {{actual_score}} is computed from real validation data.
 - The code should be a single-file Python program that is self-contained and can be executed as-is.
-- Save the final predictions to 'submission.csv' in the current directory."""
+- Save the final predictions to 'submission.csv' in the current directory (the ensemble workspace directory).
+- Ensure the submission.csv file has the correct format matching the sample submission file."""
 
     def default_template(self) -> str:
         """Default ensemble prompt template"""

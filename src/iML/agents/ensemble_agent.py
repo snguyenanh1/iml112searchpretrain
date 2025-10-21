@@ -58,6 +58,60 @@ class EnsembleAgent(BaseAgent):
         self.ensemble_plans = []  # Store all plans tried
         self.ensemble_scores = []  # Store scores for each plan
         self.ensemble_codes = []  # Store codes for each plan
+        self.metric_direction = None  # Will be determined based on task type
+    
+    def _determine_metric_direction(self) -> str:
+        """
+        Determine if higher or lower metric values are better based on task type and eval metrics.
+        
+        Returns:
+            'higher' if higher values are better (accuracy, F1, etc.)
+            'lower' if lower values are better (RMSE, MAE, loss, etc.)
+        """
+        # Try to get task information from manager
+        task_type = None
+        eval_metrics = None
+        
+        if hasattr(self.manager, 'description_analysis') and self.manager.description_analysis:
+            task_type = self.manager.description_analysis.get('task_type', '').lower()
+            eval_metrics = self.manager.description_analysis.get('eval_metrics', '').lower()
+        
+        # Metrics where lower is better
+        lower_is_better_metrics = [
+            'rmse', 'mse', 'mae', 'mape', 'loss', 'error', 'cross_entropy',
+            'log_loss', 'brier', 'deviance', 'huber'
+        ]
+        
+        # Metrics where higher is better
+        higher_is_better_metrics = [
+            'accuracy', 'f1', 'precision', 'recall', 'auc', 'roc_auc',
+            'r2', 'r_squared', 'iou', 'dice', 'jaccard', 'map', 'ndcg'
+        ]
+        
+        # Check eval_metrics string
+        if eval_metrics:
+            for metric in lower_is_better_metrics:
+                if metric in eval_metrics:
+                    logger.info(f"Metric direction determined: LOWER is better (found '{metric}' in eval_metrics)")
+                    return 'lower'
+            
+            for metric in higher_is_better_metrics:
+                if metric in eval_metrics:
+                    logger.info(f"Metric direction determined: HIGHER is better (found '{metric}' in eval_metrics)")
+                    return 'higher'
+        
+        # Fallback based on task type
+        if task_type:
+            if 'regression' in task_type:
+                logger.info(f"Metric direction determined: LOWER is better (task_type: {task_type})")
+                return 'lower'  # Most regression metrics (RMSE, MAE) are lower is better
+            elif 'classification' in task_type:
+                logger.info(f"Metric direction determined: HIGHER is better (task_type: {task_type})")
+                return 'higher'  # Most classification metrics (accuracy, F1) are higher is better
+        
+        # Default fallback
+        logger.warning("Could not determine metric direction from task info. Defaulting to LOWER is better.")
+        return 'lower'
 
     def __call__(self, iteration_paths: List[str], iteration_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -93,6 +147,9 @@ class EnsembleAgent(BaseAgent):
             }
         
         logger.info(f"🎯 Creating ensemble from {len(successful_iterations)} successful iterations")
+        
+        # Determine metric direction for score comparison
+        self.metric_direction = self._determine_metric_direction()
         
         # Step 1: Create workspace
         workspace_result = self._create_workspace(successful_paths)
@@ -560,18 +617,26 @@ class EnsembleAgent(BaseAgent):
         return 0.0  # Default score if not found
     
     def _select_best_ensemble(self) -> Dict[str, Any]:
-        """Select the best ensemble based on scores."""
+        """Select the best ensemble based on scores and metric direction."""
         if not self.ensemble_scores:
             return {
                 "status": "failed",
                 "error": "No ensemble scores available"
             }
         
-        # Filter out invalid scores (inf, nan)
+        # Filter out invalid scores (inf, nan, 0.0 default values)
         valid_indices = [
             i for i, score in enumerate(self.ensemble_scores)
-            if score != float('inf') and score == score  # Check for not inf and not nan
+            if score != float('inf') and score == score and score != 0.0  # Check for not inf, not nan, not default
         ]
+        
+        if not valid_indices:
+            logger.warning("No valid ensemble scores found (all inf/nan/0.0), falling back to all non-inf scores")
+            # Fallback: accept 0.0 scores if nothing else is available
+            valid_indices = [
+                i for i, score in enumerate(self.ensemble_scores)
+                if score != float('inf') and score == score
+            ]
         
         if not valid_indices:
             return {
@@ -579,10 +644,16 @@ class EnsembleAgent(BaseAgent):
                 "error": "No valid ensemble scores found"
             }
         
-        # Find best score (assuming lower is better for errors, higher for accuracy)
-        # This should be configurable based on metric type
-        # For now, we'll assume lower is better (common for RMSE, MAE, etc.)
-        best_idx = min(valid_indices, key=lambda i: self.ensemble_scores[i])
+        # Select best based on metric direction
+        if self.metric_direction == 'higher':
+            # Higher is better (accuracy, F1, etc.)
+            best_idx = max(valid_indices, key=lambda i: self.ensemble_scores[i])
+            logger.info(f"Selecting best ensemble: HIGHER is better - Round {best_idx} with score {self.ensemble_scores[best_idx]}")
+        else:
+            # Lower is better (RMSE, MAE, etc.)
+            best_idx = min(valid_indices, key=lambda i: self.ensemble_scores[i])
+            logger.info(f"Selecting best ensemble: LOWER is better - Round {best_idx} with score {self.ensemble_scores[best_idx]}")
+        
         best_score = self.ensemble_scores[best_idx]
         
         return {
@@ -592,7 +663,8 @@ class EnsembleAgent(BaseAgent):
             "best_plan": self.ensemble_plans[best_idx] if best_idx < len(self.ensemble_plans) else None,
             "best_code": self.ensemble_codes[best_idx] if best_idx < len(self.ensemble_codes) else None,
             "all_scores": self.ensemble_scores,
-            "num_attempts": len(self.ensemble_scores)
+            "num_attempts": len(self.ensemble_scores),
+            "metric_direction": self.metric_direction
         }
     
     def _copy_best_submission(self, best_result: Dict[str, Any]) -> Optional[str]:
@@ -602,16 +674,25 @@ class EnsembleAgent(BaseAgent):
             if best_idx is None:
                 return None
             
-            # Find submission file from best execution
-            exec_dir = Path(self.ensemble_workspace) / f"execution_round_{best_idx}"
-            submission_file = exec_dir / "submission.csv"
+            # Try multiple possible locations for the submission file
+            possible_locations = [
+                Path(self.ensemble_workspace) / f"execution_round_{best_idx}" / "submission.csv",
+                Path(self.ensemble_workspace) / "submission.csv",
+                Path(self.ensemble_workspace) / "final" / "submission.csv",
+                # Also check if ensemble code saved it in a different location
+                Path(self.ensemble_workspace) / f"submission_round_{best_idx}.csv",
+            ]
             
-            if not submission_file.exists():
-                # Try alternative location
-                submission_file = Path(self.ensemble_workspace) / "submission.csv"
+            submission_file = None
+            for location in possible_locations:
+                if location.exists():
+                    submission_file = location
+                    logger.info(f"Found submission file at: {location}")
+                    break
             
-            if not submission_file.exists():
-                logger.warning("Best ensemble submission.csv not found")
+            if not submission_file:
+                logger.error("Best ensemble submission.csv not found in any expected location")
+                logger.error(f"Checked locations: {[str(loc) for loc in possible_locations]}")
                 return None
             
             # Copy to main output folder
@@ -626,6 +707,8 @@ class EnsembleAgent(BaseAgent):
                 "best_round": best_idx,
                 "best_score": best_result.get("best_score"),
                 "best_plan": best_result.get("best_plan"),
+                "metric_direction": best_result.get("metric_direction"),
+                "all_scores": best_result.get("all_scores"),
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
             }
             
