@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -9,17 +10,48 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from pydantic import BaseModel, ConfigDict, Field
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
 logger = logging.getLogger(__name__)
 
 
+def is_503_error(exception):
+    """Check if exception is a 503 Service Unavailable error."""
+    # Check for common 503 patterns in exception message and attributes
+    exception_str = str(exception).lower()
+    
+    # Check for HTTP 503 in message
+    if '503' in exception_str or 'service unavailable' in exception_str:
+        return True
+    
+    # Check for status_code attribute (common in API errors)
+    if hasattr(exception, 'status_code') and exception.status_code == 503:
+        return True
+    
+    # Check for response attribute (from requests library)
+    if hasattr(exception, 'response') and hasattr(exception.response, 'status_code'):
+        if exception.response.status_code == 503:
+            return True
+    
+    # Check for gRPC UNAVAILABLE errors (used by some Google APIs)
+    if hasattr(exception, 'code'):
+        # gRPC code 14 = UNAVAILABLE
+        if exception.code == 14 or (hasattr(exception.code, 'value') and exception.code.value == 14):
+            return True
+    
+    return False
+
+
 def log_retry_attempt(retry_state):
-    """Custom callback to log each retry attempt"""
+    """Custom callback to log each retry attempt with special handling for 503 errors."""
     if retry_state.outcome.failed:
         exception = retry_state.outcome.exception()
         attempt_number = retry_state.attempt_number
-        logger.error(f"Attempt {attempt_number} failed: {type(exception).__name__}: {exception}")
+        
+        if is_503_error(exception):
+            logger.warning(f"⚠️  Attempt {attempt_number} - Service Unavailable (503). API is overloaded. Will retry with extended backoff...")
+        else:
+            logger.error(f"Attempt {attempt_number} failed: {type(exception).__name__}: {exception}")
 
 
 class GlobalTokenTracker:
@@ -174,9 +206,18 @@ class BaseAssistantChat(BaseModel):
             "session_name": self.session_name,
         }
 
-    @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=32, min=32, max=128), after=log_retry_attempt)
-    def assistant_chat(self, message: str, max_lines: int = 1000) -> str:
-        """Send a message and get response using LangGraph."""
+    def assistant_chat(self, message: str, max_lines: int = 1000, max_retries: int = 10) -> str:
+        """
+        Send a message and get response using LangGraph with intelligent retry logic.
+        
+        Args:
+            message: The message to send to the assistant
+            max_lines: Maximum number of lines to send (truncates if exceeded)
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            The assistant's response as a string
+        """
         if not self.app:
             raise RuntimeError("Conversation not initialized. Call initialize_conversation first.")
 
@@ -185,34 +226,74 @@ class BaseAssistantChat(BaseModel):
             message = '\n'.join(lines[:max_lines])
             logger.warning(f"Prompt truncated to {max_lines} lines.")
 
-        thread_id = str(uuid.uuid4())
-        config = {"configurable": {"thread_id": thread_id}}
-        input_messages = [HumanMessage(content=message)]
-        response = self.app.invoke({"messages": input_messages}, config)
+        attempt = 0
+        last_exception = None
+        
+        while attempt < max_retries:
+            try:
+                thread_id = str(uuid.uuid4())
+                config = {"configurable": {"thread_id": thread_id}}
+                input_messages = [HumanMessage(content=message)]
+                response = self.app.invoke({"messages": input_messages}, config)
 
-        ai_message = response["messages"][-1]
-        input_tokens = output_tokens = 0
+                ai_message = response["messages"][-1]
+                input_tokens = output_tokens = 0
 
-        if hasattr(ai_message, "usage_metadata"):
-            usage = ai_message.usage_metadata
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
+                if hasattr(ai_message, "usage_metadata"):
+                    usage = ai_message.usage_metadata
+                    input_tokens = usage.get("input_tokens", 0)
+                    output_tokens = usage.get("output_tokens", 0)
 
-            # Update both instance and global tracking
-            self.input_tokens_ += input_tokens
-            self.output_tokens_ += output_tokens
-            self.token_tracker.add_tokens(self.conversation_id, self.session_name, input_tokens, output_tokens)
+                    # Update both instance and global tracking
+                    self.input_tokens_ += input_tokens
+                    self.output_tokens_ += output_tokens
+                    self.token_tracker.add_tokens(self.conversation_id, self.session_name, input_tokens, output_tokens)
 
-        self.history_.append(
-            {
-                "input": message,
-                "output": ai_message.content,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            }
-        )
+                self.history_.append(
+                    {
+                        "input": message,
+                        "output": ai_message.content,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    }
+                )
 
-        return ai_message.content
+                return ai_message.content
+                
+            except Exception as e:
+                attempt += 1
+                last_exception = e
+                
+                if is_503_error(e):
+                    # Special handling for 503 Service Unavailable errors
+                    wait_time = 300  # 5 minutes for 503 errors
+                    logger.warning(f"🔄 Attempt {attempt}/{max_retries} - Service Unavailable (503). API is overloaded.")
+                    logger.warning(f"⏳ Waiting {wait_time} seconds (5 minutes) before retry...")
+                    
+                    if attempt < max_retries:
+                        time.sleep(wait_time)
+                        logger.info(f"🔁 Retrying request (attempt {attempt + 1}/{max_retries})...")
+                    else:
+                        logger.error(f"❌ Max retries ({max_retries}) reached for 503 errors. Giving up.")
+                        raise
+                else:
+                    # Standard exponential backoff for other errors
+                    wait_time = min(128, 32 * (2 ** (attempt - 1)))  # Exponential backoff: 32, 64, 128, 128...
+                    logger.error(f"⚠️  Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {str(e)[:200]}")
+                    
+                    if attempt < max_retries:
+                        logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                        time.sleep(wait_time)
+                        logger.info(f"🔁 Retrying request (attempt {attempt + 1}/{max_retries})...")
+                    else:
+                        logger.error(f"❌ Max retries ({max_retries}) reached. Giving up.")
+                        raise
+        
+        # If we exit the loop without success, raise the last exception
+        if last_exception:
+            raise last_exception
+        else:
+            raise RuntimeError("Unexpected error in assistant_chat retry loop")
 
     async def astream(self, message: str):
         """Stream responses using LangGraph."""
