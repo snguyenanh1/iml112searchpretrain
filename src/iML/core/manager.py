@@ -10,8 +10,9 @@ import signal
 import threading
 import platform
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Callable, Any
 from datetime import datetime
+from functools import wraps
 
 from ..agents import (
     DescriptionAnalyzerAgent,
@@ -34,6 +35,88 @@ logging.basicConfig(level=logging.INFO)
 
 # Create a logger
 logger = logging.getLogger(__name__)
+
+
+def is_503_error(exception):
+    """Check if exception is a 503 Service Unavailable error."""
+    exception_str = str(exception).lower()
+    
+    # Check for HTTP 503 in message
+    if '503' in exception_str or 'service unavailable' in exception_str:
+        return True
+    
+    # Check for status_code attribute (common in API errors)
+    if hasattr(exception, 'status_code') and exception.status_code == 503:
+        return True
+    
+    # Check for response attribute (from requests library)
+    if hasattr(exception, 'response') and hasattr(exception.response, 'status_code'):
+        if exception.response.status_code == 503:
+            return True
+    
+    # Check for gRPC UNAVAILABLE errors (used by some Google APIs)
+    if hasattr(exception, 'code'):
+        # gRPC code 14 = UNAVAILABLE
+        if exception.code == 14 or (hasattr(exception.code, 'value') and exception.code.value == 14):
+            return True
+    
+    return False
+
+
+def retry_on_api_error(max_retries: int = 10):
+    """
+    Decorator to retry agent calls on API errors with intelligent backoff.
+    Special handling for 503 errors: wait 5 minutes, retry up to 10 times.
+    For other errors: exponential backoff starting at 32 seconds.
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            attempt = 0
+            last_exception = None
+            
+            while attempt < max_retries:
+                try:
+                    # Try to execute the function
+                    return func(*args, **kwargs)
+                    
+                except Exception as e:
+                    attempt += 1
+                    last_exception = e
+                    
+                    if is_503_error(e):
+                        # Special handling for 503 Service Unavailable errors
+                        wait_time = 300  # 5 minutes for 503 errors
+                        logger.warning(f"🔄 Attempt {attempt}/{max_retries} - Service Unavailable (503). API is overloaded.")
+                        logger.warning(f"⏳ Waiting {wait_time} seconds (5 minutes) before retry...")
+                        
+                        if attempt < max_retries:
+                            time.sleep(wait_time)
+                            logger.info(f"🔁 Retrying agent call (attempt {attempt + 1}/{max_retries})...")
+                        else:
+                            logger.error(f"❌ Max retries ({max_retries}) reached for 503 errors. Giving up.")
+                            raise
+                    else:
+                        # Standard exponential backoff for other errors
+                        wait_time = min(128, 32 * (2 ** (attempt - 1)))  # 32, 64, 128, 128...
+                        logger.error(f"⚠️  Attempt {attempt}/{max_retries} failed: {type(e).__name__}: {str(e)[:200]}")
+                        
+                        if attempt < max_retries:
+                            logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                            time.sleep(wait_time)
+                            logger.info(f"🔁 Retrying agent call (attempt {attempt + 1}/{max_retries})...")
+                        else:
+                            logger.error(f"❌ Max retries ({max_retries}) reached. Giving up.")
+                            raise
+            
+            # If we exit the loop without success, raise the last exception
+            if last_exception:
+                raise last_exception
+            else:
+                raise RuntimeError("Unexpected error in retry loop")
+        
+        return wrapper
+    return decorator
 
 class IterationTimeoutError(Exception):
     """Custom exception for iteration timeout."""
@@ -177,6 +260,72 @@ class Manager:
         # Final fallback to per_execution_timeout
         return self.config.per_execution_timeout
     
+    # ==================== Agent Call Wrappers with Retry Logic ====================
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_description_analyzer(self):
+        """Call description analyzer agent with retry logic."""
+        return self.description_analyzer_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_profiling_agent(self):
+        """Call profiling agent with retry logic."""
+        return self.profiling_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_profiling_summarizer(self):
+        """Call profiling summarizer agent with retry logic."""
+        return self.profiling_summarizer_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_model_retriever(self):
+        """Call model retriever agent with retry logic."""
+        return self.model_retriever_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_guideline_agent(self, iteration_type=None):
+        """Call guideline agent with retry logic."""
+        if iteration_type:
+            return self.guideline_agent(iteration_type=iteration_type)
+        return self.guideline_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_preprocessing_coder(self, iteration_type=None):
+        """Call preprocessing coder agent with retry logic."""
+        if iteration_type:
+            return self.preprocessing_coder_agent(iteration_type=iteration_type)
+        return self.preprocessing_coder_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_modeling_coder(self, iteration_type=None):
+        """Call modeling coder agent with retry logic."""
+        if iteration_type:
+            return self.modeling_coder_agent(iteration_type=iteration_type)
+        return self.modeling_coder_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_assembler(self, iteration_type=None):
+        """Call assembler agent with retry logic."""
+        if iteration_type:
+            return self.assembler_agent(iteration_type=iteration_type)
+        return self.assembler_agent()
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_comparison_agent(self, iteration_results, original_task_description):
+        """Call comparison agent with retry logic."""
+        return self.comparison_agent(
+            iteration_results=iteration_results,
+            original_task_description=original_task_description
+        )
+    
+    @retry_on_api_error(max_retries=10)
+    def _call_ensemble_agent(self, iteration_paths, iteration_results):
+        """Call ensemble agent with retry logic."""
+        return self.ensemble_agent(
+            iteration_paths=iteration_paths,
+            iteration_results=iteration_results
+        )
+    
     def _run_iteration_with_timeout(self, iteration_type, iteration_timeout):
         """Run iteration with cross-platform timeout handling."""
         is_windows = platform.system() == "Windows"
@@ -217,7 +366,7 @@ class Manager:
             if iteration_type == "pretrained":
                 if timeout_occurred.is_set():
                     raise IterationTimeoutError("Iteration timeout occurred before model retrieval")
-                model_suggestions = self.model_retriever_agent()
+                model_suggestions = self._call_model_retriever()
                 # Stop iteration immediately if retrieval failed or empty
                 if (not model_suggestions) or ("error" in model_suggestions) or (not model_suggestions.get("sota_models")):
                     logger.error("Pretrained iteration aborted: SOTA search failed or returned no candidates.")
@@ -242,8 +391,8 @@ class Manager:
                     original_output_folder = self.output_folder
                     self.output_folder = str(candidate_dir)
 
-                    # Guideline
-                    guideline = self.guideline_agent(iteration_type=iteration_type)
+                    # Guideline (with retry)
+                    guideline = self._call_guideline_agent(iteration_type=iteration_type)
                     if "error" in guideline:
                         logger.error(f"Guideline generation failed for candidate {idx}: {guideline['error']}")
                         # Restore output folder before continuing
@@ -256,10 +405,10 @@ class Manager:
                     except Exception:
                         pass
 
-                    # Preprocessing
+                    # Preprocessing (with retry)
                     if timeout_occurred.is_set():
                         raise IterationTimeoutError("Iteration timeout occurred before preprocessing")
-                    preprocessing_code_result = self.preprocessing_coder_agent(iteration_type=iteration_type)
+                    preprocessing_code_result = self._call_preprocessing_coder(iteration_type=iteration_type)
                     if preprocessing_code_result.get("status") == "failed":
                         logger.error(f"Preprocessing failed for candidate {idx}: {preprocessing_code_result.get('error')}")
                         # Restore output folder before continuing
@@ -267,10 +416,10 @@ class Manager:
                         continue
                     self.preprocessing_code = preprocessing_code_result.get("code")
 
-                    # Modeling
+                    # Modeling (with retry)
                     if timeout_occurred.is_set():
                         raise IterationTimeoutError("Iteration timeout occurred before modeling")
-                    modeling_code_result = self.modeling_coder_agent(iteration_type=iteration_type)
+                    modeling_code_result = self._call_modeling_coder(iteration_type=iteration_type)
                     if modeling_code_result.get("status") == "failed":
                         logger.error(f"Modeling failed for candidate {idx}: {modeling_code_result.get('error')}")
                         # Restore output folder before continuing
@@ -278,10 +427,10 @@ class Manager:
                         continue
                     self.modeling_code = modeling_code_result.get("code")
 
-                    # Assembly
+                    # Assembly (with retry)
                     if timeout_occurred.is_set():
                         raise IterationTimeoutError("Iteration timeout occurred before assembly")
-                    assembler_result = self.assembler_agent(iteration_type=iteration_type)
+                    assembler_result = self._call_assembler(iteration_type=iteration_type)
                     if assembler_result.get("status") == "failed":
                         logger.error(f"Assembly failed for candidate {idx}: {assembler_result.get('error')}")
                         # Restore output folder before continuing
@@ -318,40 +467,40 @@ class Manager:
             if timeout_occurred.is_set():
                 raise IterationTimeoutError("Iteration timeout occurred before guideline generation")
                 
-            guideline = self.guideline_agent(iteration_type=iteration_type)
+            guideline = self._call_guideline_agent(iteration_type=iteration_type)
             if "error" in guideline:
                 logger.error(f"Guideline generation failed: {guideline['error']}")
                 return False
             self.guideline = guideline
             logger.info(f"Guideline generated successfully for {iteration_type}.")
 
-            # Step 2: Run Preprocessing Coder Agent
+            # Step 2: Run Preprocessing Coder Agent (with retry)
             if timeout_occurred.is_set():
                 raise IterationTimeoutError("Iteration timeout occurred before preprocessing")
                 
-            preprocessing_code_result = self.preprocessing_coder_agent(iteration_type=iteration_type)
+            preprocessing_code_result = self._call_preprocessing_coder(iteration_type=iteration_type)
             if preprocessing_code_result.get("status") == "failed":
                 logger.error(f"Preprocessing code generation failed: {preprocessing_code_result.get('error')}")
                 return False
             self.preprocessing_code = preprocessing_code_result.get("code")
             logger.info("Preprocessing code generated and validated successfully.")
 
-            # Step 3: Run Modeling Coder Agent
+            # Step 3: Run Modeling Coder Agent (with retry)
             if timeout_occurred.is_set():
                 raise IterationTimeoutError("Iteration timeout occurred before modeling")
                 
-            modeling_code_result = self.modeling_coder_agent(iteration_type=iteration_type)
+            modeling_code_result = self._call_modeling_coder(iteration_type=iteration_type)
             if modeling_code_result.get("status") == "failed":
                 logger.error(f"Modeling code generation failed: {modeling_code_result.get('error')}")
                 return False
             self.modeling_code = modeling_code_result.get("code")
             logger.info("Modeling code generated successfully.")
 
-            # Step 4: Run Assembler Agent
+            # Step 4: Run Assembler Agent (with retry)
             if timeout_occurred.is_set():
                 raise IterationTimeoutError("Iteration timeout occurred before assembly")
                 
-            assembler_result = self.assembler_agent(iteration_type=iteration_type)
+            assembler_result = self._call_assembler(iteration_type=iteration_type)
             if assembler_result.get("status") == "failed":
                 logger.error(f"Final code assembly and execution failed: {assembler_result.get('error')}")
                 return False
@@ -370,8 +519,8 @@ class Manager:
         """Run pipeline up to a specific checkpoint."""
         logger.info(f"Starting partial AutoML pipeline (stop after: {stop_after})...")
 
-        # Step 1: Run description analysis agent
-        analysis_result = self.description_analyzer_agent()
+        # Step 1: Run description analysis agent (with retry)
+        analysis_result = self._call_description_analyzer()
         if "error" in analysis_result:
             logger.error(f"Description analysis failed: {analysis_result['error']}")
             return False
@@ -382,8 +531,8 @@ class Manager:
             logger.info("Pipeline stopped after description analysis.")
             return True
 
-        # Step 2: Run profiling agent
-        profiling_result = self.profiling_agent()
+        # Step 2: Run profiling agent (with retry)
+        profiling_result = self._call_profiling_agent()
         if "error" in profiling_result:
             logger.error(f"Data profiling failed: {profiling_result['error']}")
             return False
@@ -394,15 +543,15 @@ class Manager:
             logger.info("Pipeline stopped after profiling.")
             return True
 
-        # Step 3a: Summarize profiling via LLM
-        profiling_summary = self.profiling_summarizer_agent()
+        # Step 3a: Summarize profiling via LLM (with retry)
+        profiling_summary = self._call_profiling_summarizer()
         if "error" in profiling_summary:
             logger.error(f"Profiling summarization failed: {profiling_summary['error']}")
             return False
         self.profiling_summary = profiling_summary
 
-        # Step 3b: Retrieve pretrained model suggestions
-        model_suggestions = self.model_retriever_agent()
+        # Step 3b: Retrieve pretrained model suggestions (with retry)
+        model_suggestions = self._call_model_retriever()
         self.model_suggestions = model_suggestions
 
         if stop_after == "pre-guideline":
@@ -412,8 +561,8 @@ class Manager:
             logger.info("You can now edit the guideline prompt template and resume from guideline generation.")
             return True
 
-        # Step 3c: Run guideline agent
-        guideline = self.guideline_agent()
+        # Step 3c: Run guideline agent (with retry)
+        guideline = self._call_guideline_agent()
         if "error" in guideline:
             logger.error(f"Guideline generation failed: {guideline['error']}")
             return False
@@ -516,29 +665,29 @@ class Manager:
             if not hasattr(self, 'profiling_result') or not hasattr(self, 'model_suggestions'):
                 logger.warning("Missing profiling or model suggestions data. Running those steps first...")
                 
-                # Re-run profiling if needed
+                # Re-run profiling if needed (with retry)
                 if not hasattr(self, 'profiling_result'):
-                    profiling_result = self.profiling_agent()
+                    profiling_result = self._call_profiling_agent()
                     if "error" in profiling_result:
                         logger.error(f"Data profiling failed: {profiling_result['error']}")
                         return False
                     self.profiling_result = profiling_result
                 
-                # Re-run profiling summary if needed
+                # Re-run profiling summary if needed (with retry)
                 if not hasattr(self, 'profiling_summary'):
-                    profiling_summary = self.profiling_summarizer_agent()
+                    profiling_summary = self._call_profiling_summarizer()
                     if "error" in profiling_summary:
                         logger.error(f"Profiling summarization failed: {profiling_summary['error']}")
                         return False
                     self.profiling_summary = profiling_summary
                 
-                # Re-run model retrieval if needed
+                # Re-run model retrieval if needed (with retry)
                 if not hasattr(self, 'model_suggestions'):
-                    model_suggestions = self.model_retriever_agent()
+                    model_suggestions = self._call_model_retriever()
                     self.model_suggestions = model_suggestions
             
-            # Re-run guideline generation (useful after editing prompt)
-            guideline = self.guideline_agent()
+            # Re-run guideline generation (useful after editing prompt) (with retry)
+            guideline = self._call_guideline_agent()
             if "error" in guideline:
                 logger.error(f"Guideline generation failed: {guideline['error']}")
                 return False
@@ -546,8 +695,8 @@ class Manager:
             logger.info("Guideline regenerated successfully.")
 
         if start_from in ["guideline", "preprocessing"]:
-            # Step 4: Run Preprocessing Coder Agent
-            preprocessing_code_result = self.preprocessing_coder_agent()
+            # Step 4: Run Preprocessing Coder Agent (with retry)
+            preprocessing_code_result = self._call_preprocessing_coder()
             if preprocessing_code_result.get("status") == "failed":
                 logger.error(f"Preprocessing code generation failed: {preprocessing_code_result.get('error')}")
                 return False
@@ -555,8 +704,8 @@ class Manager:
             logger.info("Preprocessing code generated and validated successfully.")
 
         if start_from in ["guideline", "preprocessing", "modeling"]:
-            # Step 5: Run Modeling Coder Agent
-            modeling_code_result = self.modeling_coder_agent()
+            # Step 5: Run Modeling Coder Agent (with retry)
+            modeling_code_result = self._call_modeling_coder()
             if modeling_code_result.get("status") == "failed":
                 logger.error(f"Modeling code generation failed: {modeling_code_result.get('error')}")
                 return False
@@ -564,8 +713,8 @@ class Manager:
             logger.info("Modeling code generated successfully.")
 
         if start_from in ["guideline", "preprocessing", "modeling", "assemble"]:
-            # Step 6: Run Assembler Agent
-            assembler_result = self.assembler_agent()
+            # Step 6: Run Assembler Agent (with retry)
+            assembler_result = self._call_assembler()
             if assembler_result.get("status") == "failed":
                 logger.error(f"Final code assembly and execution failed: {assembler_result.get('error')}")
                 return False
@@ -698,9 +847,9 @@ class Manager:
             iteration_results.append(result)
             logger.info(f"Extracted results from {result['iteration_name']}: {result['status']}")
         
-        # Use LLM to intelligently compare and rank iterations
+        # Use LLM to intelligently compare and rank iterations (with retry)
         logger.info("=== LLM-based Intelligent Iteration Comparison ===")
-        comparison_result = self.comparison_agent(
+        comparison_result = self._call_comparison_agent(
             iteration_results=iteration_results,
             original_task_description=self.description_analysis
         )
@@ -718,9 +867,9 @@ class Manager:
                 json.dump(comparison_result, f, indent=2, ensure_ascii=False)
             logger.info(f"LLM comparison report saved to: {comparison_file}")
         
-        # Create and execute ensemble from successful iterations
+        # Create and execute ensemble from successful iterations (with retry)
         logger.info("=== Creating and Executing Ensemble ===")
-        ensemble_result = self.ensemble_agent(
+        ensemble_result = self._call_ensemble_agent(
             iteration_paths=iteration_paths,
             iteration_results=iteration_results
         )
@@ -925,24 +1074,24 @@ class Manager:
     
     def _run_shared_analysis(self):
         """Run the shared analysis steps (description, profiling, summarization)."""
-        # Step 1: Run description analysis agent
-        analysis_result = self.description_analyzer_agent()
+        # Step 1: Run description analysis agent (with retry)
+        analysis_result = self._call_description_analyzer()
         if "error" in analysis_result:
             logger.error(f"Description analysis failed: {analysis_result['error']}")
             return False
         logger.info(f"Analysis result: {analysis_result}")
         self.description_analysis = analysis_result
 
-        # Step 2: Run profiling agent
-        profiling_result = self.profiling_agent()
+        # Step 2: Run profiling agent (with retry)
+        profiling_result = self._call_profiling_agent()
         if "error" in profiling_result:
             logger.error(f"Data profiling failed: {profiling_result['error']}")
             return False
         self.profiling_result = profiling_result
         logger.info("Profiling overview generated.")
 
-        # Step 3a: Summarize profiling via LLM to reduce noise
-        profiling_summary = self.profiling_summarizer_agent()
+        # Step 3a: Summarize profiling via LLM to reduce noise (with retry)
+        profiling_summary = self._call_profiling_summarizer()
         if "error" in profiling_summary:
             logger.error(f"Profiling summarization failed: {profiling_summary['error']}")
             return False
@@ -956,7 +1105,7 @@ class Manager:
         """Run the pipeline for a specific iteration type."""
         # Step 1a: For pretrained iteration, per-candidate; otherwise normal flow
         if iteration_type == "pretrained":
-            model_suggestions = self.model_retriever_agent()
+            model_suggestions = self._call_model_retriever()
             if (not model_suggestions) or ("error" in model_suggestions) or (not model_suggestions.get("sota_models")):
                 logger.error("Pretrained iteration aborted: SOTA search failed or returned no candidates.")
                 return False
@@ -975,8 +1124,8 @@ class Manager:
                 candidate_dir.mkdir(parents=True, exist_ok=True)
                 original_output_folder = self.output_folder
                 self.output_folder = str(candidate_dir)
-                # Guideline
-                guideline = self.guideline_agent(iteration_type=iteration_type)
+                # Guideline (with retry)
+                guideline = self._call_guideline_agent(iteration_type=iteration_type)
                 if "error" in guideline:
                     logger.error(f"Guideline generation failed for candidate {idx}: {guideline['error']}")
                     # Restore output folder before continuing
@@ -989,8 +1138,8 @@ class Manager:
                 except Exception:
                     pass
 
-                # Preprocessing
-                preprocessing_code_result = self.preprocessing_coder_agent(iteration_type=iteration_type)
+                # Preprocessing (with retry)
+                preprocessing_code_result = self._call_preprocessing_coder(iteration_type=iteration_type)
                 if preprocessing_code_result.get("status") == "failed":
                     logger.error(f"Preprocessing failed for candidate {idx}: {preprocessing_code_result.get('error')}")
                     # Restore output folder before continuing
@@ -998,8 +1147,8 @@ class Manager:
                     continue
                 self.preprocessing_code = preprocessing_code_result.get("code")
 
-                # Modeling
-                modeling_code_result = self.modeling_coder_agent(iteration_type=iteration_type)
+                # Modeling (with retry)
+                modeling_code_result = self._call_modeling_coder(iteration_type=iteration_type)
                 if modeling_code_result.get("status") == "failed":
                     logger.error(f"Modeling failed for candidate {idx}: {modeling_code_result.get('error')}")
                     # Restore output folder before continuing
@@ -1007,8 +1156,8 @@ class Manager:
                     continue
                 self.modeling_code = modeling_code_result.get("code")
 
-                # Assembly
-                assembler_result = self.assembler_agent(iteration_type=iteration_type)
+                # Assembly (with retry)
+                assembler_result = self._call_assembler(iteration_type=iteration_type)
                 if assembler_result.get("status") == "failed":
                     logger.error(f"Assembly failed for candidate {idx}: {assembler_result.get('error')}")
                     # Restore output folder before continuing
@@ -1037,32 +1186,32 @@ class Manager:
             if hasattr(self, "model_suggestions"):
                 delattr(self, "model_suggestions")
 
-        # Step 1b: Run guideline agent with iteration-specific algorithm constraint
-        guideline = self.guideline_agent(iteration_type=iteration_type)
+        # Step 1b: Run guideline agent with iteration-specific algorithm constraint (with retry)
+        guideline = self._call_guideline_agent(iteration_type=iteration_type)
         if "error" in guideline:
             logger.error(f"Guideline generation failed: {guideline['error']}")
             return False
         self.guideline = guideline
         logger.info(f"Guideline generated successfully for {iteration_type}.")
 
-        # Step 2: Run Preprocessing Coder Agent
-        preprocessing_code_result = self.preprocessing_coder_agent(iteration_type=iteration_type)
+        # Step 2: Run Preprocessing Coder Agent (with retry)
+        preprocessing_code_result = self._call_preprocessing_coder(iteration_type=iteration_type)
         if preprocessing_code_result.get("status") == "failed":
             logger.error(f"Preprocessing code generation failed: {preprocessing_code_result.get('error')}")
             return False
         self.preprocessing_code = preprocessing_code_result.get("code")
         logger.info("Preprocessing code generated and validated successfully.")
 
-        # Step 3: Run Modeling Coder Agent
-        modeling_code_result = self.modeling_coder_agent(iteration_type=iteration_type)
+        # Step 3: Run Modeling Coder Agent (with retry)
+        modeling_code_result = self._call_modeling_coder(iteration_type=iteration_type)
         if modeling_code_result.get("status") == "failed":
             logger.error(f"Modeling code generation failed: {modeling_code_result.get('error')}")
             return False
         self.modeling_code = modeling_code_result.get("code")
         logger.info("Modeling code generated successfully.")
 
-        # Step 4: Run Assembler Agent
-        assembler_result = self.assembler_agent(iteration_type=iteration_type)
+        # Step 4: Run Assembler Agent (with retry)
+        assembler_result = self._call_assembler(iteration_type=iteration_type)
         if assembler_result.get("status") == "failed":
             logger.error(f"Final code assembly and execution failed: {assembler_result.get('error')}")
             return False
@@ -1074,8 +1223,8 @@ class Manager:
     def run_pipeline(self):
         """Run the entire pipeline from description analysis to code generation."""
 
-        # Step 1: Run description analysis agent
-        analysis_result = self.description_analyzer_agent()
+        # Step 1: Run description analysis agent (with retry)
+        analysis_result = self._call_description_analyzer()
         if "error" in analysis_result:
             logger.error(f"Description analysis failed: {analysis_result['error']}")
             return
@@ -1083,8 +1232,8 @@ class Manager:
 
         self.description_analysis = analysis_result
 
-        # Step 2: Run profiling agent
-        profiling_result = self.profiling_agent()
+        # Step 2: Run profiling agent (with retry)
+        profiling_result = self._call_profiling_agent()
         if "error" in profiling_result:
             logger.error(f"Data profiling failed: {profiling_result['error']}")
             return
@@ -1093,19 +1242,19 @@ class Manager:
         logger.info("Profiling overview generated.")
 
         # Step 3: Run guideline agent
-        # 3a: Summarize profiling via LLM to reduce noise
-        profiling_summary = self.profiling_summarizer_agent()
+        # 3a: Summarize profiling via LLM to reduce noise (with retry)
+        profiling_summary = self._call_profiling_summarizer()
         if "error" in profiling_summary:
             logger.error(f"Profiling summarization failed: {profiling_summary['error']}")
             return
         self.profiling_summary = profiling_summary
 
-        # 3b: Retrieve pretrained model/embedding suggestions
-        model_suggestions = self.model_retriever_agent()
+        # 3b: Retrieve pretrained model/embedding suggestions (with retry)
+        model_suggestions = self._call_model_retriever()
         self.model_suggestions = model_suggestions
 
-        # 3c: Run guideline agent with summarized profiling + model suggestions
-        guideline = self.guideline_agent()
+        # 3c: Run guideline agent with summarized profiling + model suggestions (with retry)
+        guideline = self._call_guideline_agent()
         if "error" in guideline:
             logger.error(f"Guideline generation failed: {guideline['error']}")
             return
@@ -1113,8 +1262,8 @@ class Manager:
         self.guideline = guideline
         logger.info("Guideline generated successfully.")
 
-        # Step 4: Run Preprocessing Coder Agent
-        preprocessing_code_result = self.preprocessing_coder_agent()
+        # Step 4: Run Preprocessing Coder Agent (with retry)
+        preprocessing_code_result = self._call_preprocessing_coder()
         if preprocessing_code_result.get("status") == "failed":
             logger.error(f"Preprocessing code generation failed: {preprocessing_code_result.get('error')}")
             return
@@ -1122,8 +1271,8 @@ class Manager:
         self.preprocessing_code = preprocessing_code_result.get("code")
         logger.info("Preprocessing code generated and validated successfully.")
 
-        # Step 5: Run Modeling Coder Agent
-        modeling_code_result = self.modeling_coder_agent()
+        # Step 5: Run Modeling Coder Agent (with retry)
+        modeling_code_result = self._call_modeling_coder()
         if modeling_code_result.get("status") == "failed":
             logger.error(f"Modeling code generation failed: {modeling_code_result.get('error')}")
             return
@@ -1131,8 +1280,8 @@ class Manager:
         self.modeling_code = modeling_code_result.get("code")
         logger.info("Modeling code generated successfully (not yet validated).")
 
-        # Step 6: Run Assembler Agent to assemble, finalize, and run the code
-        assembler_result = self.assembler_agent()
+        # Step 6: Run Assembler Agent to assemble, finalize, and run the code (with retry)
+        assembler_result = self._call_assembler()
         if assembler_result.get("status") == "failed":
             logger.error(f"Final code assembly and execution failed: {assembler_result.get('error')}")
             return
