@@ -41,7 +41,7 @@ class EnsembleAgent(BaseAgent):
     6. Select best ensemble and save submission_ensemble.csv
     """
     
-    def __init__(self, config: Dict, manager: Any, llm_config: Dict, max_refinement_rounds: int = 3):
+    def __init__(self, config: Dict, manager: Any, llm_config: Dict, max_refinement_rounds: int = 3, max_debug_rounds: int = 5):
         super().__init__(config, manager)
         self.llm_config = llm_config
         self.llm = init_llm(
@@ -54,6 +54,7 @@ class EnsembleAgent(BaseAgent):
             llm_config=self.llm_config
         )
         self.max_refinement_rounds = max_refinement_rounds
+        self.max_debug_rounds = max_debug_rounds  # Max debug attempts per failed execution
         self.ensemble_workspace = None
         self.ensemble_plans = []  # Store all plans tried
         self.ensemble_scores = []  # Store scores for each plan
@@ -178,9 +179,15 @@ class EnsembleAgent(BaseAgent):
         )
         
         if "error" not in initial_result:
-            self.ensemble_scores.append(initial_result.get("score", 0.0))
+            score = initial_result.get("score", 0.0)
+            debug_rounds = initial_result.get("debug_rounds", 0)
+            self.ensemble_scores.append(score)
             self.ensemble_codes.append(initial_result.get("code", ""))
-            logger.info(f"✅ Initial ensemble score: {initial_result.get('score', 'N/A')}")
+            
+            if debug_rounds > 0:
+                logger.info(f"✅ Initial ensemble score: {score} (after {debug_rounds} debug round(s))")
+            else:
+                logger.info(f"✅ Initial ensemble score: {score}")
         else:
             logger.warning(f"⚠️  Initial ensemble failed: {initial_result.get('error')}")
             self.ensemble_scores.append(float('inf'))  # Bad score
@@ -214,9 +221,14 @@ class EnsembleAgent(BaseAgent):
             
             if "error" not in refined_result:
                 score = refined_result.get("score", float('inf'))
+                debug_rounds = refined_result.get("debug_rounds", 0)
                 self.ensemble_scores.append(score)
                 self.ensemble_codes.append(refined_result.get("code", ""))
-                logger.info(f"   ✅ Refined ensemble score: {score}")
+                
+                if debug_rounds > 0:
+                    logger.info(f"   ✅ Refined ensemble score: {score} (after {debug_rounds} debug round(s))")
+                else:
+                    logger.info(f"   ✅ Refined ensemble score: {score}")
             else:
                 logger.warning(f"   ⚠️  Refined ensemble failed: {refined_result.get('error')}")
                 self.ensemble_scores.append(float('inf'))
@@ -323,13 +335,13 @@ class EnsembleAgent(BaseAgent):
             
             self.manager.save_and_log_states(
                 content=prompt,
-                save_name="ensemble/round_0_plan_prompt.txt"
+                save_name="ensemble/round_0/plan_prompt.txt"
             )
             
             response = self.llm.assistant_chat(prompt)
             self.manager.save_and_log_states(
                 content=response,
-                save_name="ensemble/round_0_plan_response.txt"
+                save_name="ensemble/round_0/plan_response.txt"
             )
             
             # Extract plan from response
@@ -361,13 +373,13 @@ class EnsembleAgent(BaseAgent):
             
             self.manager.save_and_log_states(
                 content=prompt,
-                save_name=f"ensemble/round_{round_num}_plan_prompt.txt"
+                save_name=f"ensemble/round_{round_num}/plan_prompt.txt"
             )
             
             response = self.llm.assistant_chat(prompt)
             self.manager.save_and_log_states(
                 content=response,
-                save_name=f"ensemble/round_{round_num}_plan_response.txt"
+                save_name=f"ensemble/round_{round_num}/plan_response.txt"
             )
             
             plan = response.strip()
@@ -386,38 +398,101 @@ class EnsembleAgent(BaseAgent):
     
     def _implement_and_execute_plan(self, plan: str, iteration_codes: Dict[str, str],
                                    iteration_results: List[Dict], round_num: int) -> Dict[str, Any]:
-        """Implement ensemble plan as code and execute it."""
+        """Implement ensemble plan as code and execute it with auto-debug."""
         try:
             # Step 1: Generate implementation code
-            impl_code = self._generate_implementation_code(plan, iteration_codes, iteration_results)
+            impl_code = self._generate_implementation_code(plan, iteration_codes, iteration_results, round_num)
             
             if "error" in impl_code:
                 return impl_code
             
             code = impl_code["code"]
             
-            # Save the generated code
+            # Save the generated code (attempt 1)
             self.manager.save_and_log_states(
                 content=code,
-                save_name=f"ensemble/round_{round_num}_ensemble_code.py"
+                save_name=f"ensemble/round_{round_num}/attempt_1/generated_code.py"
             )
             
             # Step 2: Execute the code
             exec_result = self._execute_ensemble_code(code, round_num)
             
-            if "error" in exec_result:
-                return exec_result
+            # Step 3: Check if execution succeeded
+            if "error" not in exec_result:
+                # Success! Extract score and return
+                score = self._extract_score_from_output(exec_result["stdout"])
+                logger.info(f"✅ Ensemble execution successful on first try")
+                
+                return {
+                    "status": "success",
+                    "code": code,
+                    "score": score,
+                    "stdout": exec_result["stdout"],
+                    "stderr": exec_result["stderr"]
+                }
             
-            # Step 3: Extract score from output
-            score = self._extract_score_from_output(exec_result["stdout"])
+            # ====== AUTO-DEBUG SECTION (similar to PreprocessingCoderAgent) ======
+            logger.warning(f"⚠️  Initial execution failed. Starting auto-debug...")
+            error_message = exec_result.get("stderr", exec_result.get("error", "Unknown error"))
             
-            return {
-                "status": "success",
-                "code": code,
-                "score": score,
-                "stdout": exec_result["stdout"],
-                "stderr": exec_result["stderr"]
-            }
+            # Save initial failure
+            last_10_lines = error_message.split('\n')[-10:]
+            error_to_log = '\n'.join(last_10_lines)
+            logger.warning(f"Code execution failed. Error: {error_to_log}")
+            
+            self.manager.save_and_log_states(
+                f"---ATTEMPT 1---\nCODE:\n{code}\n\nERROR:\n{error_to_log}",
+                f"ensemble/round_{round_num}/attempt_1/failed.log"
+            )
+            
+            # Use debug agent to fix the code (similar to preprocessing_coder_agent.py)
+            task_desc = self.manager.description_analysis.get('task_description', '') if self.manager.description_analysis else ''
+            filename = "ensemble_code"
+            
+            logger.info(f"🔧 Starting LLM debug fix with google search (max {self.max_debug_rounds} rounds)...")
+            
+            ok, patched_code, debug_meta = self.manager.debug_agent.llm_debug_fix(
+                code=code,
+                stderr=error_message,
+                phase_name=f"ensemble/round_{round_num}",
+                filename=filename,
+                attempt=1,  # Initial attempt was 1
+                task_description=task_desc,
+                require_submission=True,  # Ensemble should produce submission.csv
+                submission_filename="submission.csv"
+            )
+            
+            if ok:
+                # Debug succeeded!
+                logger.info(f"✅ Debug successful after {debug_meta.get('rounds', 0)} debug round(s)")
+                
+                # Get the final result from debug
+                final_result = debug_meta.get('last_result', {})
+                stdout = final_result.get('stdout', '')
+                stderr = final_result.get('stderr', '')
+                
+                # Extract score from the successful execution
+                score = self._extract_score_from_output(stdout)
+                
+                return {
+                    "status": "success",
+                    "code": patched_code,
+                    "score": score,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "debug_rounds": debug_meta.get('rounds', 0)
+                }
+            else:
+                # Debug failed
+                logger.error(f"❌ Debug failed after {debug_meta.get('rounds', 0)} round(s)")
+                last_stderr = debug_meta.get('last_stderr', error_message)
+                
+                return {
+                    "status": "failed",
+                    "error": f"Execution failed and debug exhausted after {debug_meta.get('rounds', 0)} rounds",
+                    "last_stderr": last_stderr[-500:] if len(last_stderr) > 500 else last_stderr,
+                    "debug_meta": debug_meta
+                }
             
         except Exception as e:
             logger.error(f"Failed to implement and execute plan: {e}")
@@ -427,7 +502,7 @@ class EnsembleAgent(BaseAgent):
             }
     
     def _generate_implementation_code(self, plan: str, iteration_codes: Dict[str, str],
-                                     iteration_results: List[Dict]) -> Dict[str, Any]:
+                                     iteration_results: List[Dict], round_num: int = 0) -> Dict[str, Any]:
         """Generate executable Python code from ensemble plan."""
         try:
             prompt = self.prompt_handler.build_implementation_prompt(
@@ -436,7 +511,19 @@ class EnsembleAgent(BaseAgent):
                 iteration_results=iteration_results
             )
             
+            # Save implementation prompt
+            self.manager.save_and_log_states(
+                content=prompt,
+                save_name=f"ensemble/round_{round_num}/attempt_1/implementation_prompt.txt"
+            )
+            
             response = self.llm.assistant_chat(prompt)
+            
+            # Save implementation response
+            self.manager.save_and_log_states(
+                content=response,
+                save_name=f"ensemble/round_{round_num}/attempt_1/implementation_response.txt"
+            )
             
             # Extract code from response
             code = self._extract_code_from_response(response)
